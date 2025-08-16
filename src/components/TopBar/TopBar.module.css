@@ -1,0 +1,19 @@
+@keyframes color-cycle-green {
+  0%,100% { color:#008c00; }
+  50%     { color:#00bf00; }
+}
+
+@keyframes color-cycle-red {
+  0%,100% { color:#f87171; }
+  50%     { color:#dc2626; }
+}
+
+.colorCycleGreen {
+  animation: color-cycle-green 3s linear infinite;
+}
+
+
+
+.colorCycleRed {
+  animation: color-cycle-red 3s linear infinite;
+}
