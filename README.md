@@ -1,3 +1,9 @@
+# Also BULID UPON FLow
+
+swap contract address: 0xf7d7281a9CA59F63D47008bBd89D06Fb806D9ac8
+lending contract address: 0x2d81FAb0C922689Bcde7b72cE1Db779B973c4dA2
+oracle contract address: 0xBf64F09BD86dC246023a23A91C69771eF7906E68
+
 # Getting Started with Create React App
 
 This project was bootstrapped with [Create React App](https://github.com/facebook/create-react-app).
