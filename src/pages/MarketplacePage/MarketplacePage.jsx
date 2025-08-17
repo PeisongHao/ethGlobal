@@ -16,7 +16,7 @@ export default function Marketplace() {
             price: 10.5,
             change: 2.1,
             image: bulbasaur,
-            id: "bulba001",
+            id: "0x3f44Bd6B6A8a2c6443ddDa37Dc6AB00752e55c4F",
             type: "pokemon",
         },
         {
@@ -24,7 +24,7 @@ export default function Marketplace() {
             price: 25.0,
             change: -1.3,
             image: h1,
-            id: "hero001",
+            id: "0x3f44Bd6B6A8a2c6443ddDa37Dc6AB00752e55c4F",
             type: "pokemon",
         },
         ];
