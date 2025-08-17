@@ -13,6 +13,7 @@
     "axios": "^1.11.0",
     "clsx": "^2.1.1",
     "dayjs": "^1.11.13",
+    "ethers": "^6.15.0",
     "framer-motion": "^12.23.12",
     "react": "^19.1.1",
     "react-apexcharts": "^1.7.0",

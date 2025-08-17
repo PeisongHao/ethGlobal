@@ -33,7 +33,7 @@ const TokenCard = ({ token }) => {
           token.change >= 0 ? "text-[#00a300]" : "text-red-500"
         }`}
       >
-        {token.price.toFixed(2)} Flow
+        {token.price.toFixed(2)} USDC
       </p>
       <p
         className={`text-ms font-medium ${

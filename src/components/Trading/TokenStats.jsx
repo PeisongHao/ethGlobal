@@ -3,7 +3,7 @@ import clsx from "clsx"
 
 export default function TokenStats({
   tokenId,
-  baseSymbol = "Flow",
+  baseSymbol = "USDC",
   price,         // 1.85
   usdPrice,      // 3.76
   change24h,     // 3.52   (percent)
@@ -15,8 +15,11 @@ export default function TokenStats({
   const pctColor = change24h >= 0 ? "text-[#00a300]" : "text-red-500"
   const pctSign = change24h >= 0 ? "+" : ""
 
-  const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 2 })
-
+  const fmt = new Intl.NumberFormat("en-US", { 
+    minimumFractionDigits: 2, 
+    maximumFractionDigits: 6  // 你可以设大一些，比如 6
+  })
+  console.log(price);
   return (
     <div className="px-6 py-2 ">
       <div className="flex justify-between gap-8">

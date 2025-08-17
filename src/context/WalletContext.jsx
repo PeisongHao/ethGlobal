@@ -1,11 +1,13 @@
 import React, { createContext, useEffect, useState } from "react";
-import * as fcl from "@onflow/fcl";
 
-// Flow Testnet 配置
-fcl.config()
-  .put("accessNode.api", "https://rest-testnet.onflow.org") // Testnet 节点
-  .put("flow.network", "testnet")
-//   .put("discovery.wallet", "https://fcl-discovery.onflow.org/testnet/authn"); // 钱包发现服务
+/**
+ * MetaMask-based wallet context
+ * ------------------------------------------------------------
+ * - Keeps the SAME API surface as your original Flow context:
+ *   flowAddress, flowBalance, connectFlowWallet, fetchFlowBalance,
+ *   refreshFlowBalance, sendFlowTransaction
+ * - Uses window.ethereum (MetaMask or compatible).
+ */
 
 export const FlowWalletContext = createContext({
   flowAddress: null,
@@ -17,62 +19,96 @@ export const FlowWalletContext = createContext({
 });
 
 export const FlowWalletProvider = ({ children }) => {
-  const [flowAddress, setFlowAddress] = useState(null);
-  const [flowBalance, setFlowBalance] = useState(null);
+  const [flowAddress, setFlowAddress] = useState(null); // EVM address (0x...)
+  const [flowBalance, setFlowBalance] = useState(null); // string in ETH
 
-  // 监听当前登录用户
+  // ---- helpers ----
+  const getProvider = () => {
+    if (typeof window !== "undefined" && window.ethereum) return window.ethereum;
+    console.warn("MetaMask (window.ethereum) not found.");
+    return null;
+  };
+
+  const hexWeiToEthString = (hexWei) => {
+  const wei = parseInt(hexWei, 16);
+  return (wei / 1e18).toFixed(4);
+};
+
+  // ---- event listeners for account/chain changes ----
   useEffect(() => {
-    fcl.currentUser().subscribe((user) => {
-      if (user && user.addr) {
-        setFlowAddress(user.addr);
-        refreshFlowBalance(user.addr);
+    const provider = getProvider();
+    if (!provider) return;
+
+    // Try to read current account without prompting
+    provider
+      .request({ method: "eth_accounts" })
+      .then((accounts) => {
+        if (accounts && accounts[0]) {
+          setFlowAddress(accounts[0]);
+          refreshFlowBalance(accounts[0]);
+        }
+      })
+      .catch(() => {});
+
+    const onAccountsChanged = (accounts) => {
+      if (accounts && accounts.length > 0) {
+        setFlowAddress(accounts[0]);
+        refreshFlowBalance(accounts[0]);
       } else {
         setFlowAddress(null);
         setFlowBalance(null);
       }
-    });
+    };
+
+    const onChainChanged = () => {
+      // Chain changed—refresh balance if we still have an address
+      if (flowAddress) refreshFlowBalance(flowAddress);
+    };
+
+    provider.on?.("accountsChanged", onAccountsChanged);
+    provider.on?.("chainChanged", onChainChanged);
+
+    return () => {
+      provider.removeListener?.("accountsChanged", onAccountsChanged);
+      provider.removeListener?.("chainChanged", onChainChanged);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // 连接 Flow 钱包
+  // Connect MetaMask
   const connectFlowWallet = async () => {
+    const provider = getProvider();
+    if (!provider) {
+      console.error("MetaMask not available.");
+      return;
+    }
     try {
-      await fcl.authenticate();
+      const accounts = await provider.request({ method: "eth_requestAccounts" });
+      const addr = accounts[0];
+      setFlowAddress(addr);
+      await refreshFlowBalance(addr);
     } catch (err) {
       console.error("connectFlowWallet error:", err);
     }
   };
 
-  // 查询 Flow 原生币余额
+  // Query native balance (ETH) for an address
   const fetchFlowBalance = async (address) => {
+    const provider = getProvider();
+    if (!provider || !address) return "0.0";
     try {
-      const script = `
-        import FungibleToken from 0x9a0766d93b6608b7
-        import FlowToken from 0x7e60df042a9c0868
-
-        // 查询余额（可能为 nil：未初始化或未暴露能力）
-        access(all) fun main(account: Address): UFix64? {
-            let cap: Capability<&{FungibleToken.Balance}> =
-                getAccount(account)
-                    .capabilities
-                    .get<&{FungibleToken.Balance}>(/public/flowTokenBalance)
-
-            let ref = cap.borrow()
-            if ref == nil { return nil }
-            return ref!.balance
-        }
-      `;
-      const res = await fcl.query({
-        cadence: script,
-        args: (arg, t) => [arg(address, t.Address)]
+      const weiHex = await provider.request({
+        method: "eth_getBalance",
+        params: [address, "latest"],
       });
-      return res;
+      return hexWeiToEthString(weiHex);
     } catch (err) {
       console.error("fetchFlowBalance error:", err);
       return "0.0";
     }
   };
 
-  // 刷新余额
+  // Refresh balance (uses current address if none provided)
   const refreshFlowBalance = async (addr) => {
     const target = addr || flowAddress;
     if (!target) return null;
@@ -81,27 +117,30 @@ export const FlowWalletProvider = ({ children }) => {
     return bal;
   };
 
-  // 发送简单的交易（示例）
+  // Send a simple transaction via MetaMask (0 ETH to self by default)
+  // NOTE: This still costs gas on real networks. Adjust 'to' and 'value' as needed.
   const sendFlowTransaction = async () => {
+    const provider = getProvider();
+    if (!provider || !flowAddress) {
+      return { success: false, error: "Wallet not connected." };
+    }
     try {
-      const txId = await fcl.mutate({
-        cadence: `
-          transaction {
-            prepare(acct: AuthAccount) {
-              log("Signed by: ".concat(acct.address.toString()))
-            }
-          }
-        `,
-        proposer: fcl.currentUser,
-        payer: fcl.currentUser,
-        authorizations: [fcl.currentUser],
-        limit: 50
+      const txHash = await provider.request({
+        method: "eth_sendTransaction",
+        params: [
+          {
+            from: flowAddress,
+            to: flowAddress, // no-op self tx; change as needed
+            value: "0x0",    // 0 ETH
+            data: "0x",      // no data
+          },
+        ],
       });
-      const sealed = await fcl.tx(txId).onceSealed();
-      return { success: true, txHash: sealed.transactionId };
+      // No "onceSealed" equivalent here; return hash immediately
+      return { success: true, txHash };
     } catch (err) {
       console.error("sendFlowTransaction error:", err);
-      return { success: false, error: err.message };
+      return { success: false, error: err?.message || String(err) };
     }
   };
 
@@ -121,4 +160,5 @@ export const FlowWalletProvider = ({ children }) => {
   );
 };
 
+// Keep the alias export the same
 export { FlowWalletProvider as WalletProvider };
