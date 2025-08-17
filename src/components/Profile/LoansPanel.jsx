@@ -1,6 +1,6 @@
 // LoansPanelBackend.jsx (frontend-only, ethers v6, Flow EVM Testnet)
 import React, { useEffect, useMemo, useState } from "react"
-import { BrowserProvider, JsonRpcProvider, Contract, Interface, formatUnits, parseUnits, id as keccakTopic } from "ethers"
+import { BrowserProvider, JsonRpcProvider, Contract, Interface, formatUnits, id as keccakTopic } from "ethers"
 
 // ---------- ENV & 常量 ----------
 const RPC_URL = process.env.REACT_APP_RPC_URL || "https://testnet.evm.nodes.onflow.org"
@@ -91,7 +91,6 @@ export default function LoansPanel() {
     async function connect() {
       try {
         if (!window.ethereum) return
-        const provider = new BrowserProvider(window.ethereum)
         const accs = await window.ethereum.request({ method: "eth_accounts" })
         if (accs && accs[0] && !stopped) setWalletAddress(accs[0])
         // 监听账户/链变化
@@ -103,7 +102,7 @@ export default function LoansPanel() {
     return () => { stopped = true }
   }, [])
 
-  // 抓历史（事件）
+  // 抓“当前钱包”的历史（事件）
   async function fetchLoans() {
     if (!LOAN_CONTRACT) {
       setError("Please set REACT_APP_LOAN_CONTRACT in .env")
@@ -130,13 +129,20 @@ export default function LoansPanel() {
 
       const iface = new Interface(LOAN_ABI)
 
-      // 组装 created
+      // 组装 created — 仅保留“属于当前钱包”的
       const map = new Map() // index -> loan
       for (const lg of createdLogs) {
         let ev
         try { ev = iface.parseLog(lg) } catch { continue }
         // 兼容不同参数名的 ABI：按顺序取
         const [index, borrower, amount, collateralToken, collateralAmount, ts] = ev.args
+
+        // ✅ 关键：只保留“当前钱包地址”的借贷
+        if (walletAddress && String(borrower).toLowerCase() !== walletAddress.toLowerCase()) {
+          continue
+        }
+
+        // 取事件时间（优先区块时间；若事件自带 timestamp 也可用）
         const block = await provider.getBlock(lg.blockNumber)
         const createdAt = block?.timestamp || Number(ts || 0)
 
@@ -146,7 +152,7 @@ export default function LoansPanel() {
         map.set(Number(index), {
           index: Number(index),
           borrower: String(borrower),
-          amount: principal,                 // 人类可读（XRP/Flow，按 LOAN_DECIMALS）
+          amount: principal,                 // 人类可读金额（按 LOAN_DECIMALS）
           timestamp: Number(createdAt),
           iso: fmtISO(createdAt),
           repaid: false,
@@ -156,11 +162,14 @@ export default function LoansPanel() {
         })
       }
 
-      // 标记 repaid
+      // 标记 repaid（同样只影响当前钱包的）
       for (const lg of repaidLogs) {
         let ev
         try { ev = iface.parseLog(lg) } catch { continue }
-        const [index] = ev.args
+        const [index, borrower] = ev.args
+        if (walletAddress && String(borrower).toLowerCase() !== walletAddress.toLowerCase()) {
+          continue
+        }
         const item = map.get(Number(index))
         if (item) item.repaid = true
       }
@@ -180,7 +189,7 @@ export default function LoansPanel() {
   const active = rows.filter((r) => !r.repaid)
   const done   = rows.filter((r) =>  r.repaid)
 
-  // 打开弹窗（金额固定为本金）
+  // 打开弹窗（金额显示为本金；如你的合约需要应还利息，请在后端或合约里计算）
   const openRepay = (loan) => {
     setCurrentLoan(loan)
     setModalState("idle")
@@ -226,7 +235,7 @@ export default function LoansPanel() {
     <div className="w-full max-w-4xl mx-auto">
       <div className="mb-4 flex items-center gap-3">
         <h2 className="text-xl font-semibold">
-          Loans for <span className="font-mono">{shorten(walletAddress) || "—"}</span>
+          My Loans <span className="text-sm text-neutral-500">(Wallet: <span className="font-mono">{shorten(walletAddress) || "—"}</span>)</span>
         </h2>
         <button
           onClick={fetchLoans}
@@ -239,6 +248,12 @@ export default function LoansPanel() {
         >
           {loading ? "Refreshing..." : "Refresh"}
         </button>
+      </div>
+
+      {/* 顶部统计 */}
+      <div className="mb-4 text-sm text-neutral-700">
+        <span className="mr-4">Active: <b>{active.length}</b></span>
+        <span>Repaid: <b>{done.length}</b></span>
       </div>
 
       {error && (
@@ -255,7 +270,7 @@ export default function LoansPanel() {
         </div>
         {active.length === 0 ? (
           <div className="rounded-lg border border-neutral-200 p-4 text-sm text-neutral-500">
-            No active loans.
+            No active loans for this wallet.
           </div>
         ) : (
           <ul className="space-y-3">
@@ -267,7 +282,7 @@ export default function LoansPanel() {
                 <div>
                   <div className="text-sm text-neutral-500">Index #{r.index}</div>
                   <div className="text-base font-semibold">
-                    Principal (XRP): <span className="font-mono">{fmtBig(r.amount)}</span>
+                    Principal: <span className="font-mono">{fmtBig(r.amount)}</span>
                   </div>
                   <div className="text-sm text-neutral-600">Created: {r.iso}</div>
                   <div className="text-sm text-neutral-600">
@@ -319,7 +334,7 @@ export default function LoansPanel() {
               <li key={`done-${r.index}`} className="rounded-xl border border-neutral-200 p-4">
                 <div className="text-sm text-neutral-500">Index #{r.index}</div>
                 <div className="text-base font-semibold">
-                  Principal (XRP): <span className="font-mono">{fmtBig(r.amount)}</span>
+                  Principal: <span className="font-mono">{fmtBig(r.amount)}</span>
                 </div>
                 <div className="text-sm text-neutral-600">Created: {r.iso}</div>
                 <div className="text-sm text-neutral-600">
@@ -344,7 +359,7 @@ export default function LoansPanel() {
         )}
       </section>
 
-      {/* Repay Modal（金额固定为本金，只展示） */}
+      {/* Repay Modal（金额显示为本金） */}
       {showModal && currentLoan && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
@@ -382,7 +397,7 @@ export default function LoansPanel() {
                     <span className="font-mono">{humanizeDuration(currentLoan.timestamp)}</span>
                   </div>
                   <div className="flex justify-between">
-                    <span>Amount due (XRP):</span>
+                    <span>Amount due:</span>
                     <span className="font-mono font-semibold">{fmtBig(currentLoan.amount)}</span>
                   </div>
                 </div>

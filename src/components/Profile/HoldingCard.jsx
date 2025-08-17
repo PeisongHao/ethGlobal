@@ -1,6 +1,64 @@
+/* eslint-disable no-console */
 import React, { useState, useContext } from "react"
 import { FlowWalletContext } from "../../context/WalletContext";
 import { useNavigate } from "react-router-dom";
+
+// —— 新增：ethers & 链接配置、最小 ABI
+import {
+  BrowserProvider,
+  Contract,
+  parseUnits,
+  formatUnits,
+  MaxUint256,
+} from "ethers";
+
+const RPC_URL = process.env.REACT_APP_RPC_URL || "https://testnet.evm.nodes.onflow.org";
+// 你的 UsdcLendingVault 地址（.env: REACT_APP_VAULT）
+const VAULT_ADDRESS = (process.env.REACT_APP_VAULT || "").trim();
+// USDC 的小数位（一般 6；.env: REACT_APP_USDC_DECIMALS）
+const USDC_DECIMALS = Number(process.env.REACT_APP_USDC_DECIMALS || 6);
+// Flow EVM Testnet
+const EVM_FLOW_TESTNET_CHAIN_HEX = "0x221";
+
+// Vault 只需用到的函数
+const VAULT_ABI = [
+  "function previewAdditionalCollateral(address collateralToken, uint256 borrowAmountUSDC) view returns (uint256)",
+  "function borrowWithCollateral(address collateralToken, uint256 borrowAmountUSDC) returns (uint256 collateralPulled)",
+  "function collateralPos(address) view returns (address token, uint256 amount)",   // 新增：校验是否切换抵押物
+];
+
+// 最小 ERC20 ABI：需要 balanceOf 来做余额检查
+const ERC20_ABI = [
+  "function decimals() view returns (uint8)",
+  "function balanceOf(address) view returns (uint256)",   // 新增
+  "function allowance(address owner, address spender) view returns (uint256)",
+  "function approve(address spender, uint256 value) returns (bool)",
+];
+
+// 保证链在 Flow EVM Testnet
+async function ensureFlowEvm() {
+  if (!window.ethereum) throw new Error("No wallet detected. Please install MetaMask.");
+  const chainId = await window.ethereum.request({ method: "eth_chainId" });
+  if (chainId !== EVM_FLOW_TESTNET_CHAIN_HEX) {
+    try {
+      await window.ethereum.request({
+        method: "wallet_switchEthereumChain",
+        params: [{ chainId: EVM_FLOW_TESTNET_CHAIN_HEX }],
+      });
+    } catch {
+      await window.ethereum.request({
+        method: "wallet_addEthereumChain",
+        params: [{
+          chainId: EVM_FLOW_TESTNET_CHAIN_HEX,
+          chainName: "Flow EVM Testnet",
+          nativeCurrency: { name: "FLOW", symbol: "FLOW", decimals: 18 },
+          rpcUrls: [RPC_URL],
+          blockExplorerUrls: ["https://evm-testnet.flowscan.io"],
+        }],
+      });
+    }
+  }
+}
 
 const HoldingCard = ({ token }) => {
   const navigate = useNavigate();
@@ -30,7 +88,7 @@ const HoldingCard = ({ token }) => {
   const maxAmount = Number(token?.amount ?? 0);
   const valuePerToken = Number(token.value) || 0;
 
-  // lending calc
+  // lending calc（仍按 70% LTV 预估展示；实际以合约/Oracle为准）
   const numericLend = Number(lendAmount);
   const isNumberLend = Number.isFinite(numericLend);
   const withinBalanceLend = isNumberLend && numericLend > 0 && numericLend <= maxAmount;
@@ -62,17 +120,85 @@ const HoldingCard = ({ token }) => {
   const openStake = () => { resetStakeModal(); setShowStakeModal(true); };
   const closeStake = () => { setShowStakeModal(false); };
 
-  // -------- LENDING SUBMIT --------
+  // -------- LENDING SUBMIT（与 Vault 交互） --------
   const handleSubmit = async (chosenTokenAmount) => {
-    if (!flowAddress) { alert("Wallet not connected"); return; }
-    try {
-     //这里改成和ether交互
-    } catch (err) {
-      console.error('Error submitting offer:', err);
-      setError(err?.response?.data?.message || err?.message || "There was an error submitting your offer.");
-      setSubmitState("idle");
+  if (!flowAddress) { alert("Wallet not connected"); return; }
+  if (!VAULT_ADDRESS) { setError("Vault address not configured (REACT_APP_VAULT)."); return; }
+  if (!token?.id) { setError("Missing collateral token address on this card."); return; }
+
+  try {
+    setSubmitState("submitting");
+    setError("");
+
+    await ensureFlowEvm();
+    const provider = new BrowserProvider(window.ethereum);
+    const signer = await provider.getSigner();
+
+    const collateralAddr = token.id; // 这张卡对应的 ERC20 抵押物
+    const vault = new Contract(VAULT_ADDRESS, VAULT_ABI, signer);
+    const collateral = new Contract(collateralAddr, ERC20_ABI, signer);
+
+    // 1) UI 里“想借多少 USDC”（按你现有展示逻辑：数量 * 单价 * 0.7）
+    const borrowFloat = Number(chosenTokenAmount) * Number(valuePerToken) * 0.7;
+    if (!Number.isFinite(borrowFloat) || borrowFloat <= 0) {
+      throw new Error("Borrow amount computed invalid. Please check input.");
     }
-  };
+    const borrowAmountUSDC = parseUnits(String(borrowFloat), USDC_DECIMALS);
+
+    // 2) 不允许在有仓位时切换抵押物（你的合约有这个限制）
+    try {
+      const cp = await vault.collateralPos(flowAddress);
+      const currentColl = String(cp[0] || "").toLowerCase();
+      if (currentColl && currentColl !== "0x0000000000000000000000000000000000000000" && currentColl !== collateralAddr.toLowerCase()) {
+        throw new Error("You already use another collateral token. Please repay first.");
+      }
+    } catch (_) {}
+
+    // 3) 读取抵押物 decimals，把“你愿意抵押的数量”换成最小单位
+    const collDecimals = await collateral.decimals();
+    const userInputUnits = parseUnits(String(chosenTokenAmount), collDecimals);
+
+    // 4) 预估本次需要“新增抵押”的单位数（单位=抵押物原始单位）
+    //    这是关键：用它来对比余额和 allowance，避免链上回退。
+    let requiredUnits = 0n;
+    try {
+      requiredUnits = await vault.previewAdditionalCollateral(collateralAddr, borrowAmountUSDC);
+    } catch {
+      // 少数实现没有这个 view；此时我们保守地用“你愿意抵押的数量”去做额度校验
+      requiredUnits = userInputUnits;
+    }
+
+    // 5) 余额检查：你是否至少有 requiredUnits
+    const walletBal = await collateral.balanceOf(flowAddress);
+    if (walletBal < requiredUnits) {
+      const need = Number(formatUnits(requiredUnits, collDecimals)).toFixed(6);
+      const have = Number(formatUnits(walletBal, collDecimals)).toFixed(6);
+      throw new Error(`Insufficient ${token.symbol} balance: need ~${need}, you have ${have}.`);
+    }
+
+    // 6) allowance 检查：不足就一次性授权 MaxUint256（避免每次都授权）
+    const allowance = await collateral.allowance(flowAddress, VAULT_ADDRESS);
+    if (allowance < requiredUnits) {
+      const txA = await collateral.approve(VAULT_ADDRESS, MaxUint256);
+      await txA.wait();
+    }
+
+    // 7) 正式借款
+    const tx = await vault.borrowWithCollateral(collateralAddr, borrowAmountUSDC);
+    await tx.wait();
+
+    setSubmittedXRP(borrowFloat);
+    setSubmitState("success");
+    // TODO：这里触发你的全局刷新（余额/仓位）
+  } catch (err) {
+    console.error("borrow failed:", err);
+    const msg = err?.reason || err?.data?.message || err?.message || "There was an error submitting your offer.";
+    setError(msg);
+    setSubmitState("idle");
+  }
+};
+
+
 
   const handleConfirm = async () => {
     setError("");
@@ -87,13 +213,11 @@ const HoldingCard = ({ token }) => {
     if (!isNumberStake || numericStake <= 0) { setStakeError("Please enter a valid number greater than 0."); return; }
     if (numericStake > maxAmount) { setStakeError(`You only have ${maxAmount} ${token.symbol}.`); return; }
 
-    // Simulate a quick submit + success (no backend)
     try {
       setStakeState("submitting");
-      await new Promise((r) => setTimeout(r, 900)); // short spinner
+      await new Promise((r) => setTimeout(r, 900));
       setStakedAmount(numericStake);
       setStakeState("success");
-      // optional: you could call fetchTokens() here if staking changes balances later
     } catch (e) {
       setStakeError("Something went wrong. Please try again.");
       setStakeState("idle");
@@ -127,7 +251,7 @@ const HoldingCard = ({ token }) => {
       <h3 className="text-lg font-semibold text-neutral-800">{token.name}</h3>
       <p className="mt-2 text-md font-semibold text-neutral-700">{token.amount} {token.symbol}</p>
       <p className={`mt-1 text-md font-semibold ${token.change >= 0 ? "text-[#00a300]" : "text-red-500"}`}>
-        {valuePerToken.toFixed(2)} XRP {token.change}%
+        {valuePerToken.toFixed(2)} USDC {token.change}%
       </p>
 
       {/* hover actions */}
@@ -217,11 +341,11 @@ const HoldingCard = ({ token }) => {
                 <div className="mt-3 text-sm text-neutral-700">
                   <div className="flex justify-between">
                     <span>Estimated you can borrow (70%):</span>
-                    <span className="font-semibold">{formatXRP(estimatedXRP)} XRP</span>
+                    <span className="font-semibold">{formatXRP(estimatedXRP)} USDC</span>
                   </div>
                   <div className="mt-1 flex justify-between text-neutral-500">
                     <span>Price per token:</span>
-                    <span>{valuePerToken.toFixed(6)} XRP</span>
+                    <span>{valuePerToken.toFixed(6)} USDC</span>
                   </div>
                   <div className="mt-1 flex justify-between text-neutral-500">
                     <span>Remaining after lend:</span>
@@ -252,7 +376,12 @@ const HoldingCard = ({ token }) => {
                     Cancel
                   </button>
                   <button
-                    onClick={handleConfirm}
+                    onClick={async () => {
+                      setError("");
+                      if (!isNumberLend || numericLend <= 0) { setError("Please enter a valid number greater than 0."); return; }
+                      if (numericLend > maxAmount) { setError(`You only have ${maxAmount} ${token.symbol}.`); return; }
+                      await handleSubmit(numericLend);
+                    }}
                     disabled={!withinBalanceLend}
                     className={`rounded-md px-4 py-2 text-sm font-semibold text-white
                       ${withinBalanceLend
@@ -285,7 +414,7 @@ const HoldingCard = ({ token }) => {
                   </div>
                   <h3 className="text-lg font-semibold text-neutral-900">Success</h3>
                   <p className="mt-2 text-sm text-neutral-700">
-                    Successfully borrowed <span className="font-semibold">{formatXRP(submittedXRP)} XRP</span>.
+                    Successfully borrowed <span className="font-semibold">{formatXRP(submittedXRP)} USDC</span>.
                   </p>
                   <p className="mt-1 text-xs text-neutral-500">
                     The funds should arrive in your wallet within a few minutes.
