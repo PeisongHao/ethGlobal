@@ -1,7 +1,7 @@
 import React from "react";
 import { BrowserRouter as Router, Route, Routes } from "react-router-dom";
 import { WalletProvider } from "./context/WalletContext";
-// import ProfilePage from "./pages/ProfilePage/ProfilePage";
+import ProfilePage from "./pages/ProfilePage/ProfilePage";
 import MarketplacePage from "./pages/MarketplacePage/MarketplacePage";
 // import AboutPage from "./pages/AboutPage/AboutPage";
 import TradingPage from "./pages/TradingPage/TradingPage";
@@ -18,7 +18,8 @@ const App = () => {
       <Route path="/marketplace" element={<MarketplacePage />} />
       <Route path="home" element={<LandingPage />} />
       <Route path="/trade/:tokenId" element={<TradingPage />} />
-      {/* <Route path="/profile" element={<ProfilePage />} />
+      <Route path="/profile" element={<ProfilePage />} />
+      {/* 
       <Route path="/about" element={<AboutPage />}/>
       <Route path="/list" element={<ListingPage />}/>
       <Route path="/redeem/:tokenId" element={<RedeemPage />} />
